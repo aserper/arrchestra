@@ -35,16 +35,22 @@ async def test_stdio_protocol_only_stdout(module, isolated, caplog, tmp_path):
                 await session.initialize()
                 names = {tool.name for tool in (await session.list_tools()).tools}
                 seerr_reads = {'search_media', 'get_request', 'list_requests',
-                               'get_media_requests', 'request_media'}
+                               'get_media_requests'}
+                seerr_writes = {'request_media', 'remove_request', 'remove_media',
+                                'retry_request', 'set_request_status'}
                 if isolated:
-                    assert names == {'ping', 'get_services'} | seerr_reads
+                    assert names == {'ping', 'get_services'} | seerr_reads | seerr_writes
                 else:
-                    assert {'ping', 'get_services'} | seerr_reads <= names
+                    assert {'ping', 'get_services'} | seerr_reads | seerr_writes <= names
                 ping = await session.call_tool('ping',{})
                 assert not ping.isError
                 denied = await session.call_tool('request_media',{'media_id':1,'media_type':'movie'})
                 assert denied.isError
-                assert 'wire-secret-key' not in str(ping) + str(denied)
+                # Read-only mode must refuse every new mutation too, over the
+                # real wire path rather than only in-process.
+                refused = await session.call_tool('remove_request', {'request_id': 74})
+                assert refused.isError
+                assert 'wire-secret-key' not in str(ping) + str(denied) + str(refused)
         errlog.seek(0)
         assert 'wire-secret-key' not in errlog.read()
     assert 'Failed to parse' not in caplog.text

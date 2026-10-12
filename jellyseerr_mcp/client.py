@@ -1,7 +1,7 @@
 """Backward-compatible Jellyseerr/Seerr tools with explicit mutation policy."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -21,9 +21,14 @@ REQUEST_SORTS = ('added', 'modified')
 REQUEST_MEDIA_TYPES = ('movie', 'tv')
 
 REQUEST_FIELDS = ('id', 'status', 'type', 'is4k', 'createdAt', 'updatedAt',
-                  'seasonCount', 'profileName', 'rootFolder')
+                  'seasonCount', 'profileName', 'rootFolder', 'serverId', 'profileId')
 REQUESTER_FIELDS = ('id', 'displayName', 'email', 'plexUsername', 'userType')
 SEASON_FIELDS = ('seasonNumber', 'status')
+# Seerr's own status enums, from its published OpenAPI document. Invalid values
+# are rejected upstream, so they are rejected here without a round trip.
+REQUEST_APPROVAL_STATUSES = ('approve', 'decline')
+MEDIA_STATUSES = ('available', 'partial', 'processing', 'pending', 'unknown', 'deleted')
+ApprovalStatus = Literal['approve', 'decline']
 REQUEST_MEDIA_FIELDS = ('id', 'mediaType', 'tmdbId', 'tvdbId', 'status', 'status4k',
                         'serviceId', 'serviceId4k', 'externalServiceId',
                         'externalServiceId4k', 'externalServiceSlug',
@@ -73,7 +78,7 @@ class JellyseerrClient(ServiceClient):
     def request(self, method: str, endpoint: str, *, params: dict | None = None,
                 json: dict | None = None) -> Any:
         method = method.upper()
-        if method not in {"GET", "POST", "PUT"}:
+        if method not in {"GET", "POST", "PUT", "DELETE"}:
             raise ValueError("Unsupported service method")
         return self.request_json(method, "api/v1/" + endpoint.lstrip("/"),
                                  params=params, json=json, mutation=method != "GET")
@@ -210,6 +215,90 @@ class JellyseerrClient(ServiceClient):
                 'seasons': [select(s, ('seasonNumber', 'status'))
                             for s in (info.get('seasons') or []) if isinstance(s, dict)],
                 'requests': requests, 'total': len(requests)}
+
+    def remove_request(self, request_id: int) -> dict:
+        """Remove one Seerr request, without touching the title it asked for.
+
+        Deleting a request only clears the log entry. The ``media`` record it
+        pointed at survives, so a later request for the same title is accepted
+        again instead of being rejected as a duplicate. ``remove_media`` is the
+        operation that also deletes the title and its file.
+
+        A request Seerr has already forgotten answers 404, which is reported as
+        ``removed: false`` rather than raised.
+        """
+        request_id = positive_id(request_id, 'request_id')
+        try:
+            self.request("DELETE", f"request/{request_id}")
+        except ServiceError as exc:
+            # The mutation carries no read-back of its own, so a 404 is checked
+            # from a fresh read rather than assumed from the error text.
+            if self._request_exists(request_id):
+                raise
+            return {'request_id': request_id, 'removed': False, 'reason': 'not_found'}
+        return {'request_id': request_id, 'removed': True}
+
+    def remove_media(self, media_id: int) -> dict:
+        """Delete one Seerr media item, discarding its availability status.
+
+        This removes the title from Seerr's tracking, its request history and
+        its availability state; it does NOT delete the file on disk or remove
+        the title from Sonarr/Radarr. A media id is NOT a TMDB id and NOT a
+        request id; both are valid-looking numbers that address other records.
+
+        Seerr answers 204 for ANY media id, present or not, so the response
+        cannot confirm a record existed. The result therefore reports
+        ``removed`` (the delete was accepted) separately from ``verified``
+        (a record is known to have existed), and never claims a file was
+        touched.
+        """
+        media_id = positive_id(media_id, 'media_id')
+        self.request("DELETE", f"media/{media_id}")
+        return {'media_id': media_id, 'removed': True, 'verified': False,
+                'note': 'Seerr tracking only; files and the Sonarr/Radarr entry are '
+                        'untouched. Seerr accepts any id here, so removal is not verifiable.'}
+
+    def retry_request(self, request_id: int) -> dict:
+        """Re-run the arr push for a request that never reached Sonarr/Radarr.
+
+        This is the supported repair for a request stuck with a null
+        ``externalServiceId``: Seerr re-attempts the add instead of creating a
+        duplicate request. It does not search for or download anything.
+        """
+        request_id = positive_id(request_id, 'request_id')
+        result = self.request("POST", f"request/{request_id}/retry")
+        payload = result if isinstance(result, dict) else {}
+        item = _request_item(payload) or {'id': request_id}
+        media = item.get('media') or {}
+        return {'request_id': request_id, 'retried': True,
+                'request': item,
+                'external_service_id': media.get('externalServiceId'),
+                'pushed_to_arr': bool(media.get('externalServiceId'))}
+
+    def set_request_status(self, request_id: int, status: ApprovalStatus) -> dict:
+        """Approve or decline one request.
+
+        Approval is what lets Seerr push a request to Sonarr/Radarr, so this is
+        the decision point, not a bookkeeping flag.
+        """
+        request_id = positive_id(request_id, 'request_id')
+        if status not in REQUEST_APPROVAL_STATUSES:
+            raise ValueError("status must be one of: " + ", ".join(REQUEST_APPROVAL_STATUSES))
+        result = self.request("POST", f"request/{request_id}/{status}")
+        payload = result if isinstance(result, dict) else {}
+        item = _request_item(payload) or {'id': request_id}
+        return {'request_id': request_id, 'status': status, 'request': item}
+
+    def _request_exists(self, request_id: int) -> bool:
+        """Whether a request id is still readable; used to classify a delete.
+
+        Deliberately boolean: the point is only to tell "already gone" apart
+        from a real failure, never to surface an upstream body.
+        """
+        try:
+            return isinstance(self.request("GET", f"request/{request_id}"), dict)
+        except ServiceError:
+            return False
 
     def raw_read(self, method: str, endpoint: str, params: dict | None = None,
                  body: dict | None = None) -> dict:

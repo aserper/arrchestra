@@ -143,6 +143,8 @@ Hermes and OpenClaw configuration follows their documentation; end-to-end sessio
 | "Why hasn't Arrival imported? Check Radarr's queue and history." | Radarr queue, history and import diagnostics |
 | "Show the SABnzbd queue, then pause the download I choose." | Downloader queue and per-job pause |
 | "Who requested Mad Men, and when?" | Seerr request history |
+| "That request is stuck. Approve it and make Seerr push it again." | Seerr request status and retry |
+| "Remove those bogus requests, but keep the titles." | Seerr request removal |
 
 Calendars, lookups and status checks work in read-only mode. Requests, monitoring changes, searches that trigger downloads, and download controls need [write permission](#allowing-changes). `get_services` shows which services are connected and whether writes are enabled.
 
@@ -169,6 +171,17 @@ Sonarr monitoring changes only the selected seasons or episodes. Season and epis
 Both are read-only and need no writes. Two upstream quirks shape them: `/api/v1/media` deliberately omits `requests`, and `request?mediaId=` is silently ignored (it returns the whole log), so per-title history only comes from the title's own detail endpoint. Seerr also answers 500, not 404, for a TMDB id it has never seen, which these tools report as `in_seerr: false` rather than an error. Filters, sorts and media types are validated locally because Seerr rejects a bad value with 400 but silently ignores an unknown `requestedBy`.
 
 Paging is reported as `native` from Seerr's `pageInfo`; a title the requester list does not match returns an empty page rather than an error.
+
+### Fixing and removing requests
+
+A request that never reached Sonarr or Radarr sits in the log forever without ever downloading. The signal is `media.externalServiceId` being empty on a request that is otherwise approved. `retry_request` is Seerr's own repair for it: it re-runs the push and reports `pushed_to_arr` from the result, instead of creating a second request. `set_request_status` approves or declines one request (`approve` or `decline`); approval is the decision that lets Seerr push to the arr, not a bookkeeping flag.
+
+Removal comes in two deliberately separate operations, because they delete different things:
+
+- `remove_request` clears ONE log entry. The title's media record survives, so it can be requested again later. A request Seerr has already forgotten reports `removed: false` instead of failing.
+- `remove_media` deletes ONE Seerr media item, discarding its availability status, request history and availability state. It does **not** delete the file on disk and does **not** remove the title from Sonarr or Radarr.
+
+A media ID is neither a TMDB ID nor a request ID. Seerr also accepts any media ID with a success response, even one it never had, so `remove_media` reports `removed` (the delete was accepted) separately from `verified` (a record is known to have existed). Neither tool can be used to delete files.
 
 ### NZBHydra downloads
 
@@ -208,7 +221,7 @@ If NZB retrieval redirects to an indexer, add that indexer's origin to `NZBHYDRA
 | Group | Tools |
 | --- | --- |
 | Common | `ping`, `get_services` |
-| Seerr | `search_media`, `request_media`, `get_request`, `list_requests`, `get_media_requests` |
+| Seerr | `search_media`, `request_media`, `get_request`, `list_requests`, `get_media_requests`, `set_request_status`, `retry_request`, `remove_request`, `remove_media` |
 | Radarr | `radarr_find_movies`, `radarr_get_movie`, `radarr_get_options`, `radarr_get_queue`, `radarr_get_history`, `radarr_get_health`, `radarr_get_calendar`, `radarr_get_releases`, `radarr_get_command`, `radarr_add_movie`, `radarr_set_monitored`, `radarr_search_movie`, `radarr_grab_release` |
 | Sonarr | `sonarr_find_series`, `sonarr_get_series`, `sonarr_get_episodes`, `sonarr_get_next_up`, `sonarr_get_missing`, `sonarr_get_calendar`, `sonarr_get_options`, `sonarr_get_queue`, `sonarr_get_history`, `sonarr_get_health`, `sonarr_get_releases`, `sonarr_get_command`, `sonarr_add_series`, `sonarr_set_monitoring`, `sonarr_search_episodes`, `sonarr_grab_release`, `sonarr_remove_queue_item` |
 | Downloaders | `downloads_get_status`, `downloads_get_queue`, `downloads_get_history`, `downloads_get_categories`, `downloads_pause`, `downloads_resume`, `downloads_retry` |
