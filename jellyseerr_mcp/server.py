@@ -105,6 +105,13 @@ def build_server(config: AppConfig, clients: dict[str, ServiceClient] | None = N
         seerr = cast(JellyseerrClient, clients["jellyseerr"])
         register("search_media", seerr.search_media, "Search Seerr/Jellyseerr by text query.")
         register("get_request", seerr.get_request, "Inspect an existing Seerr request by its request ID.")
+        register("list_requests", seerr.list_requests,
+                 "List the Seerr request log newest-first with requester attribution (who asked, who approved), "
+                 "optionally filtered by requester user id or media type. Prefer this over get_request when the "
+                 "request ID is not already known.")
+        register("get_media_requests", seerr.get_media_requests,
+                 "List every Seerr request for one title by TMDB ID, oldest first: requesters, seasons and "
+                 "approval state. A title Seerr has never seen is reported as in_seerr=false, not as an error.")
         register("request_media", seerr.request_media,
                  "Create a Seerr request (preserves its approval workflow). Movie or TV TMDB ID; TV seasons default to [1]. Requires Seerr writes.", True)
         if config.allow_raw_read:

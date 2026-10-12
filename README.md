@@ -142,6 +142,7 @@ Hermes and OpenClaw configuration follows their documentation; end-to-end sessio
 | "Stop monitoring season 1 of Severance. Leave the other seasons alone." | Sonarr season monitoring |
 | "Why hasn't Arrival imported? Check Radarr's queue and history." | Radarr queue, history and import diagnostics |
 | "Show the SABnzbd queue, then pause the download I choose." | Downloader queue and per-job pause |
+| "Who requested Mad Men, and when?" | Seerr request history |
 
 Calendars, lookups and status checks work in read-only mode. Requests, monitoring changes, searches that trigger downloads, and download controls need [write permission](#allowing-changes). `get_services` shows which services are connected and whether writes are enabled.
 
@@ -156,7 +157,20 @@ You can also add media directly with `radarr_add_movie` or `sonarr_add_series`. 
 
 IDs depend on the operation: Seerr requests and Radarr additions use TMDB IDs; Sonarr additions use TVDB IDs. Once a title is in your library, monitoring and search tools use its Sonarr or Radarr ID. Episode tools use Sonarr episode IDs and check that they belong to the selected series.
 
-Sonarr monitoring changes only the selected seasons or episodes. Season and episode changes require separate calls.
+Sonarr monitoring changes only the selected seasons or episodes. Season and episode changes require separate calls. All of this works in read-only mode except `request_media` and the direct additions.
+
+### Seerr request history
+
+"Who asked for this?" is a request-log question, not a library one:
+
+- `list_requests` pages the request log newest-first (`page_number`, `limit` up to 100) and carries the requester on every entry. `requested_by` is who asked; `modified_by` is whoever last acted, usually the approving admin, and the two routinely differ. Narrow with `requested_by` (Seerr user id) and `media_type`, or `filter`.
+- `get_media_requests` answers it for one title by TMDB id, oldest first, so the first entry is the original requester. Use it instead of scanning the log when the title is known.
+
+Both are read-only and need no writes. Two upstream quirks shape them: `/api/v1/media` deliberately omits `requests`, and `request?mediaId=` is silently ignored (it returns the whole log), so per-title history only comes from the title's own detail endpoint. Seerr also answers 500, not 404, for a TMDB id it has never seen, which these tools report as `in_seerr: false` rather than an error. Filters, sorts and media types are validated locally because Seerr rejects a bad value with 400 but silently ignores an unknown `requestedBy`.
+
+Paging is reported as `native` from Seerr's `pageInfo`; a title the requester list does not match returns an empty page rather than an error.
+
+### NZBHydra downloads
 
 ### Upcoming episodes and movie releases
 
@@ -194,7 +208,7 @@ If NZB retrieval redirects to an indexer, add that indexer's origin to `NZBHYDRA
 | Group | Tools |
 | --- | --- |
 | Common | `ping`, `get_services` |
-| Seerr | `search_media`, `request_media`, `get_request` |
+| Seerr | `search_media`, `request_media`, `get_request`, `list_requests`, `get_media_requests` |
 | Radarr | `radarr_find_movies`, `radarr_get_movie`, `radarr_get_options`, `radarr_get_queue`, `radarr_get_history`, `radarr_get_health`, `radarr_get_calendar`, `radarr_get_releases`, `radarr_get_command`, `radarr_add_movie`, `radarr_set_monitored`, `radarr_search_movie`, `radarr_grab_release` |
 | Sonarr | `sonarr_find_series`, `sonarr_get_series`, `sonarr_get_episodes`, `sonarr_get_next_up`, `sonarr_get_missing`, `sonarr_get_calendar`, `sonarr_get_options`, `sonarr_get_queue`, `sonarr_get_history`, `sonarr_get_health`, `sonarr_get_releases`, `sonarr_get_command`, `sonarr_add_series`, `sonarr_set_monitoring`, `sonarr_search_episodes`, `sonarr_grab_release`, `sonarr_remove_queue_item` |
 | Downloaders | `downloads_get_status`, `downloads_get_queue`, `downloads_get_history`, `downloads_get_categories`, `downloads_pause`, `downloads_resume`, `downloads_retry` |

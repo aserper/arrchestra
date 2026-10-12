@@ -34,6 +34,8 @@ Writes require both `MCP_READ_ONLY=false` and the target service's `ALLOW_WRITES
 
 Use `/api/v1` with `X-Api-Key`. Preserve `%20` search encoding, existing tool names and the default TV season `[1]`. Service defaults come from Seerr; language-profile IDs aren't guessed. A direct Sonarr/Radarr addition is separate from a Seerr request and its approval policy.
 
+Request history reads two endpoints because neither alone is sufficient. `GET /api/v1/request` is the paged log (`take`, `skip`, `filter`, `sort`, `requestedBy`, `mediaType`) and carries `requestedBy` on every record; `GET /api/v1/{tv|movie}/{tmdbId}` carries `mediaInfo.requests` for one title. `GET /api/v1/media` omits `requests` entirely, and `request` silently ignores a `mediaId` filter, so a title-scoped read must not be built on either. Two upstream behaviours are load-bearing: an unknown `requestedBy` returns 200 with an empty page instead of an error, so the response cannot confirm the filter was honored and the values are validated locally; and an unknown TMDB id answers 500 (not 404), which is "never requested", not a fault.
+
 ### Radarr and Sonarr
 
 Use `/api/v3` with `X-Api-Key`. External catalog IDs and native library IDs must stay distinct. Additions check existing library membership and validate profile/root choices before posting. They don't search automatically.
