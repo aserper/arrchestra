@@ -34,10 +34,12 @@ async def test_stdio_protocol_only_stdout(module, isolated, caplog, tmp_path):
             async with ClientSession(read,write,read_timeout_seconds=timedelta(seconds=10)) as session:
                 await session.initialize()
                 names = {tool.name for tool in (await session.list_tools()).tools}
+                seerr_reads = {'search_media', 'get_request', 'list_requests',
+                               'get_media_requests', 'request_media'}
                 if isolated:
-                    assert names == {'ping','get_services','search_media','get_request','request_media'}
+                    assert names == {'ping', 'get_services'} | seerr_reads
                 else:
-                    assert {'ping','get_services','search_media','get_request','request_media'} <= names
+                    assert {'ping', 'get_services'} | seerr_reads <= names
                 ping = await session.call_tool('ping',{})
                 assert not ping.isError
                 denied = await session.call_tool('request_media',{'media_id':1,'media_type':'movie'})

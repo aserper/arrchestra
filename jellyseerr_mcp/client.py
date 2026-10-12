@@ -7,7 +7,61 @@ from urllib.parse import quote
 import httpx
 
 from .config import AppConfig, ServiceConfig
-from .http import ServiceClient, non_negative_id, positive_id
+from .http import ServiceClient, ServiceError, non_negative_id, positive_id, select
+
+# Seerr accepts a wider take than this; the cap keeps one tool call from
+# pulling an unbounded slice of the request log into the model's context.
+MAX_REQUEST_PAGE = 100
+
+# Enum values verified against a live instance (2026-10-12): anything outside
+# these sets answers 400, so they are rejected locally instead of round-tripped.
+REQUEST_FILTERS = ('all', 'approved', 'available', 'pending', 'processing',
+                   'unavailable', 'failed', 'deleted', 'completed')
+REQUEST_SORTS = ('added', 'modified')
+REQUEST_MEDIA_TYPES = ('movie', 'tv')
+
+REQUEST_FIELDS = ('id', 'status', 'type', 'is4k', 'createdAt', 'updatedAt',
+                  'seasonCount', 'profileName', 'rootFolder')
+REQUESTER_FIELDS = ('id', 'displayName', 'email', 'plexUsername', 'userType')
+SEASON_FIELDS = ('seasonNumber', 'status')
+REQUEST_MEDIA_FIELDS = ('id', 'mediaType', 'tmdbId', 'tvdbId', 'status', 'status4k',
+                        'serviceId', 'serviceId4k', 'externalServiceId',
+                        'externalServiceId4k', 'externalServiceSlug',
+                        'externalServiceSlug4k', 'ratingKey', 'mediaUrl', 'serviceUrl',
+                        'createdAt', 'mediaAddedAt')
+
+
+def _bounded_text(value: Any, limit: int = 500) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _request_item(record: Any) -> dict:
+    """Project one Seerr request record; never pass an upstream body through.
+
+    The requester identity is the point of this projection, so it is kept
+    explicit: ``requested_by`` (who asked) and ``modified_by`` (who last acted,
+    usually the approving admin) are different fields and routinely differ.
+
+    ``media.externalServiceId`` is the Sonarr/Radarr instance for the normal
+    quality, ``externalServiceId4k`` a separate one — they are not the same
+    record, so both are carried through.
+    """
+    if not isinstance(record, dict):
+        return {}
+    item = select(record, REQUEST_FIELDS)
+    media = record.get('media')
+    if isinstance(media, dict):
+        item['media'] = select(media, REQUEST_MEDIA_FIELDS)
+    seasons = [select(s, SEASON_FIELDS) for s in (record.get('seasons') or [])
+               if isinstance(s, dict)]
+    item['seasons'] = seasons
+    item['season_numbers'] = [s['seasonNumber'] for s in seasons if 'seasonNumber' in s]
+    for key, field in (('requested_by', 'requestedBy'), ('modified_by', 'modifiedBy')):
+        who = record.get(field)
+        if isinstance(who, dict):
+            item[key] = select(who, REQUESTER_FIELDS)
+    return item
 
 
 class JellyseerrClient(ServiceClient):
@@ -67,6 +121,95 @@ class JellyseerrClient(ServiceClient):
 
     def get_request(self, request_id: int) -> dict:
         return self.request("GET", f"request/{positive_id(request_id, 'request_id')}")
+
+    def _requests_query(self, page_number: object, limit: object, filter: object,
+                        sort: object, requested_by: object,
+                        media_type: object) -> tuple[dict, int, int]:
+        """Validate every bounded input before the single outbound read.
+
+        Seerr ignores an unsupported query parameter instead of rejecting it
+        (``mediaId=`` returns the whole log) and silently accepts an unknown
+        ``requestedBy``, so an unvalidated filter would look like it worked
+        while returning everyone's requests. Everything is checked here because
+        none of it can be caught from the response.
+        """
+        page_number, limit = self._request_paging(page_number, limit)
+        if filter not in REQUEST_FILTERS:
+            raise ValueError("filter must be one of: " + ", ".join(REQUEST_FILTERS))
+        if sort not in REQUEST_SORTS:
+            raise ValueError("sort must be one of: " + ", ".join(REQUEST_SORTS))
+        params = {'take': limit, 'skip': (page_number - 1) * limit,
+                  'filter': filter, 'sort': sort}
+        if requested_by is not None:
+            params['requestedBy'] = positive_id(requested_by, 'requested_by')
+        if media_type is not None:
+            if media_type not in REQUEST_MEDIA_TYPES:
+                raise ValueError("media_type must be one of: " + ", ".join(REQUEST_MEDIA_TYPES))
+            params['mediaType'] = media_type
+        return params, page_number, limit
+
+    def _request_paging(self, page_number: object, limit: object) -> tuple[int, int]:
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+            raise ValueError("page_number must be a positive integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_REQUEST_PAGE:
+            raise ValueError(f"limit must be between 1 and {MAX_REQUEST_PAGE}")
+        return page_number, limit
+
+    def list_requests(self, page_number: int = 1, limit: int = 25,
+                      filter: str = 'all', sort: str = 'added',
+                      requested_by: int | None = None,
+                      media_type: str | None = None) -> dict:
+        """Paged Seerr request log with requester attribution.
+
+        Seerr's own ``pageInfo`` is echoed rather than recomputed: an unknown
+        ``requestedBy`` returns a 200 with zero results, so the upstream page
+        count is the only trustworthy total.
+        """
+        params, page_number, limit = self._requests_query(page_number, limit, filter,
+                                                          sort, requested_by, media_type)
+        response = self.request("GET", "request", params=params)
+        if not isinstance(response, dict):
+            raise ValueError("Seerr returned an unexpected request list")
+        items = [_request_item(r) for r in (response.get('results') or [])]
+        info = response.get('pageInfo')
+        reported = info.get('results') if isinstance(info, dict) else None
+        total = reported if isinstance(reported, int) and not isinstance(reported, bool) \
+            else len(items)
+        offset = (page_number - 1) * limit
+        return {'items': items, 'offset': offset, 'limit': limit, 'total': total,
+                'has_more': offset + len(items) < total, 'pagination': 'native'}
+
+    def get_media_requests(self, tmdb_id: int, media_type: str = 'tv') -> dict:
+        """Every Seerr request for one title, keyed by TMDB id.
+
+        ``/api/v1/media`` deliberately omits ``requests``, and ``request``
+        ignores a ``mediaId`` filter, so the title's own detail endpoint is the
+        only route to per-title request history. A title absent from Seerr
+        answers 500 (not 404), which is reported as "never requested" rather
+        than raised as a fault.
+        """
+        tmdb_id = positive_id(tmdb_id, 'tmdb_id')
+        if media_type not in REQUEST_MEDIA_TYPES:
+            raise ValueError("media_type must be one of: " + ", ".join(REQUEST_MEDIA_TYPES))
+        try:
+            detail = self.request("GET", f"{media_type}/{tmdb_id}")
+        except ServiceError:
+            detail = None
+        if not isinstance(detail, dict):
+            return {'tmdb_id': tmdb_id, 'media_type': media_type, 'title': None,
+                    'in_seerr': False, 'requests': [], 'total': 0}
+        info = detail.get('mediaInfo')
+        info = info if isinstance(info, dict) else {}
+        requests = [_request_item(r) for r in (info.get('requests') or [])]
+        requests.sort(key=lambda r: r.get('createdAt') or '')
+        title = detail.get('name') if media_type == 'tv' else detail.get('title')
+        return {'tmdb_id': tmdb_id, 'media_type': media_type,
+                'title': _bounded_text(title) if title else None,
+                'in_seerr': bool(info.get('id')),
+                'media': select(info, REQUEST_MEDIA_FIELDS),
+                'seasons': [select(s, ('seasonNumber', 'status'))
+                            for s in (info.get('seasons') or []) if isinstance(s, dict)],
+                'requests': requests, 'total': len(requests)}
 
     def raw_read(self, method: str, endpoint: str, params: dict | None = None,
                  body: dict | None = None) -> dict:

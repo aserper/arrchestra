@@ -21,9 +21,36 @@ async def test_ping_discovery_and_conditional_tools():
                              httpx.MockTransport(lambda request: httpx.Response(200,json={'results':[]})))
     server = build_server(AppConfig(), {'jellyseerr':client})
     names = {tool.name for tool in await server.list_tools()}
-    assert names == {'ping','get_services','search_media','get_request','request_media'}
+    assert names == {'ping','get_services','search_media','get_request','list_requests',
+                     'get_media_requests','request_media'}
     assert unpack(await server.call_tool('ping',{})) == {'ok':True,'service':'arrchestra-mcp'}
     assert not unpack(await server.call_tool('get_services',{}))['services'][0]['writes_enabled']
+    client.close()
+
+
+@pytest.mark.asyncio
+async def test_seerr_request_reads_are_registered_read_only():
+    """Requester attribution is an inspection tool: it must be advertised
+    read-only and must work with writes disabled."""
+    calls = []
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path == '/api/v1/request':
+            return httpx.Response(200, json={'pageInfo': {'results': 1},
+                                             'results': [{'id': 72, 'requestedBy': {'id': 8, 'displayName': 'Chromenom'}}]})
+        return httpx.Response(200, json={'name': 'Mad Men', 'mediaInfo': {'id': 541, 'requests': []}})
+    client = JellyseerrClient(ServiceConfig('jellyseerr','https://test.local'),
+                              httpx.MockTransport(handler))
+    server = build_server(AppConfig(), {'jellyseerr': client})
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    for name in ('list_requests', 'get_media_requests'):
+        assert tools[name].annotations.readOnlyHint is True
+    listed = unpack(await server.call_tool('list_requests', {'limit': 1}))
+    assert listed['items'][0]['requested_by']['displayName'] == 'Chromenom'
+    assert listed['total'] == 1 and listed['pagination'] == 'native'
+    per_title = unpack(await server.call_tool('get_media_requests', {'tmdb_id': 1104, 'media_type': 'tv'}))
+    assert per_title['title'] == 'Mad Men' and per_title['requests'] == []
+    assert calls == [('GET', '/api/v1/request'), ('GET', '/api/v1/tv/1104')]
     client.close()
 
 
