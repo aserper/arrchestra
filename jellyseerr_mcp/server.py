@@ -114,6 +114,14 @@ def build_server(config: AppConfig, clients: dict[str, ServiceClient] | None = N
                  "approval state. A title Seerr has never seen is reported as in_seerr=false, not as an error.")
         register("request_media", seerr.request_media,
                  "Create a Seerr request (preserves its approval workflow). Movie or TV TMDB ID; TV seasons default to [1]. Requires Seerr writes.", True)
+        register("remove_request", seerr.remove_request,
+                 "Remove ONE Seerr request by its request ID. Clears the log entry only: the title's media record and its file are untouched, so it can be requested again. Already-absent requests report removed=false instead of failing. Never deletes files.", True)
+        register("remove_media", seerr.remove_media,
+                 "Delete ONE Seerr media item by its media ID, discarding its availability status and request history. Does NOT delete the file on disk and does NOT remove the title from Sonarr/Radarr. A media ID is neither a TMDB ID nor a request ID. Seerr answers success even for an unknown ID, so this means 'no longer tracked', not 'a record was deleted'.", True)
+        register("retry_request", seerr.retry_request,
+                 "Re-run the Sonarr/Radarr push for a request that never reached the arr (null externalServiceId), instead of creating a duplicate request. Reports pushed_to_arr from the response. Does not search or download. Requires Seerr writes.", True)
+        register("set_request_status", seerr.set_request_status,
+                 "Approve or decline ONE Seerr request by its request ID. Approval is what lets Seerr push the request to Sonarr/Radarr, not a bookkeeping flag. Requires Seerr writes.", True)
         if config.allow_raw_read:
             register("raw_request", seerr.raw_read, "Legacy opt-in inspection: GET status only; no body or query parameters, never writes.")
 

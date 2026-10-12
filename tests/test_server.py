@@ -22,7 +22,8 @@ async def test_ping_discovery_and_conditional_tools():
     server = build_server(AppConfig(), {'jellyseerr':client})
     names = {tool.name for tool in await server.list_tools()}
     assert names == {'ping','get_services','search_media','get_request','list_requests',
-                     'get_media_requests','request_media'}
+                     'get_media_requests','request_media','remove_request','remove_media',
+                     'retry_request','set_request_status'}
     assert unpack(await server.call_tool('ping',{})) == {'ok':True,'service':'arrchestra-mcp'}
     assert not unpack(await server.call_tool('get_services',{}))['services'][0]['writes_enabled']
     client.close()
@@ -79,6 +80,60 @@ async def test_mocked_seerr_tool_contract():
     result = unpack(await server.call_tool('search_media',{'query':'Test Movie'}))
     assert result['results'][0]['id'] == 1
     assert 'query=Test%20Movie' in str(requests[0].url)
+    client.close()
+
+
+@pytest.mark.asyncio
+async def test_seerr_request_mutations_are_write_annotated_and_gated():
+    """The new request mutations must be advertised as writes (not read-only)
+    and must be refused by global read-only mode over the real dispatch path."""
+    client = JellyseerrClient(ServiceConfig('jellyseerr','https://test.local',allow_writes=True),
+                              httpx.MockTransport(lambda request: pytest.fail('network call')))
+    server = build_server(AppConfig(read_only=True), {'jellyseerr': client})
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    for name in ('remove_request', 'remove_media', 'retry_request', 'set_request_status'):
+        assert tools[name].annotations.readOnlyHint is False
+    for name, args in [('remove_request', {'request_id': 74}),
+                       ('remove_media', {'media_id': 550}),
+                       ('retry_request', {'request_id': 74}),
+                       ('set_request_status', {'request_id': 74, 'status': 'approve'})]:
+        with pytest.raises(Exception, match='read-only'):
+            await server.call_tool(name, args)
+    client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_request_tool_reaches_only_the_request_endpoint():
+    """Wire-level contract: removing a request must never touch /media.
+
+    Collapsing the two deletes into one call would silently delete the title
+    (and, on the file variant, its content), so the endpoint is asserted.
+    """
+    seen = []
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(204)
+    client = JellyseerrClient(ServiceConfig('jellyseerr','https://test.local',allow_writes=True),
+                              httpx.MockTransport(handler))
+    # AppConfig defaults to read-only, so operator mode must be explicit here.
+    server = build_server(AppConfig(read_only=False), {'jellyseerr': client})
+    result = unpack(await server.call_tool('remove_request', {'request_id': 74}))
+    assert result == {'request_id': 74, 'removed': True}
+    assert seen == [('DELETE', '/api/v1/request/74')]
+    client.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_request_tool_reports_the_arr_push_state():
+    def handler(request):
+        return httpx.Response(200, json={'id': 74, 'type': 'movie',
+                                         'media': {'id': 550, 'externalServiceId': 812}})
+    client = JellyseerrClient(ServiceConfig('jellyseerr','https://test.local',allow_writes=True),
+                              httpx.MockTransport(handler))
+    server = build_server(AppConfig(read_only=False), {'jellyseerr': client})
+    result = unpack(await server.call_tool('retry_request', {'request_id': 74}))
+    assert result['retried'] is True and result['pushed_to_arr'] is True
+    assert result['external_service_id'] == 812
     client.close()
 
 
