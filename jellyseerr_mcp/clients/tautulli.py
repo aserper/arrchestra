@@ -27,7 +27,9 @@ from datetime import date
 
 from ..http import ServiceClient, ServiceError, pagination, positive_id, select
 
-SERVER_STATUS_FIELDS = ('result', 'message')
+# Live Tautulli 2.17 answers server_status with data {"connected": bool}; result/message
+# are envelope fields that _unwrap consumes, so they never reach the projection.
+SERVER_STATUS_FIELDS = ('connected', 'result', 'message')
 
 ACTIVITY_FIELDS = ('session_key', 'session_id', 'user', 'user_id', 'friendly_name',
                    'media_type', 'title', 'full_title', 'parent_title', 'grandparent_title',
@@ -293,7 +295,11 @@ class TautulliClient(ServiceClient):
     def server_status(self) -> dict:
         """Tautulli's connection health; the safest first call to verify setup."""
         data = self._fetch('server_status')
-        return _project(data, SERVER_STATUS_FIELDS) if isinstance(data, dict) else {}
+        status = _project(data, SERVER_STATUS_FIELDS) if isinstance(data, dict) else {}
+        # An empty projection would read as "fine" while saying nothing; report the
+        # Plex connection explicitly instead.
+        status['connected'] = status.get('connected') is True
+        return status
 
     def activity(self, session_key: int | str | None = None,
                  session_id: str | None = None) -> dict:
