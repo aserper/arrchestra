@@ -64,10 +64,11 @@ def test_success_unwraps_the_data_and_sends_cmd_and_apikey():
 
     def responder(request):
         calls.append(cmd_of(request))
-        return envelope({"result": "success", "message": "Ok"})
+        return envelope({"connected": True})
 
     client = make_client(Fake(responder))
-    assert client.server_status() == {"result": "success", "message": "Ok"}
+    # The live 2.17 shape: data is {"connected": true}, not a result/message pair.
+    assert client.server_status() == {"connected": True}
     assert calls == ["server_status"]
     client.close()
 
@@ -619,7 +620,7 @@ def test_free_text_is_bounded_across_every_exposed_record():
     def responder(request):
         cmd = cmd_of(request)
         if cmd == "server_status":
-            return envelope({"result": "success", "message": HUGE})
+            return envelope({"connected": True, "message": HUGE})
         if cmd == "get_history":
             return envelope({"recordsTotal": 1, "recordsFiltered": 1, "data": [
                 {"row_id": 1, "date": 1762000000, "full_title": HUGE, "title": HUGE,
@@ -782,3 +783,11 @@ def test_no_destructive_or_administrative_commands_are_reachable():
     for forbidden in ("terminate_session", "delete_history", "delete_all", "restart",
                       "update_metadata_details", "notify", "edit_library", "delete_user"):
         assert f"'{forbidden}'" not in source and f'"{forbidden}"' not in source
+
+
+def test_server_status_reports_a_lost_plex_connection_explicitly():
+    """An empty or false status must surface as connected=False, never as {}."""
+    for data in ({"connected": False}, {}):
+        client = make_client(Fake(lambda request, d=data: envelope(d)))
+        assert client.server_status()["connected"] is False
+        client.close()
