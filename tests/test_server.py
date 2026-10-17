@@ -5,6 +5,7 @@ import pytest
 
 from jellyseerr_mcp.client import JellyseerrClient
 from jellyseerr_mcp.clients.arr import RadarrClient, SonarrClient
+from jellyseerr_mcp.clients.tautulli import TautulliClient
 from jellyseerr_mcp.config import AppConfig, ServiceConfig
 from jellyseerr_mcp.server import build_server
 
@@ -181,3 +182,99 @@ async def test_queue_removal_tool_registers_for_sonarr_only():
     # It mutates state, so it must not be advertised as read-only.
     assert tool.annotations.readOnlyHint is False
     sonarr.close()
+
+
+@pytest.mark.asyncio
+async def test_tautulli_tools_register_read_only_and_only_when_configured():
+    """Tautulli is inspection-only: every registered tool must be advertised as
+    read-only, and none may exist when the service is not configured."""
+    def handler(request):
+        return httpx.Response(200, json={'response': {'result': 'success', 'data': []}})
+    tautulli = TautulliClient(ServiceConfig('tautulli', 'http://tautulli.test:8181',
+                                            api_key='key'),
+                              httpx.MockTransport(handler))
+    server = build_server(AppConfig(), {'tautulli': tautulli})
+    tools = await server.list_tools()
+    names = {tool.name for tool in tools}
+    expected = {'tautulli_get_server_status', 'tautulli_get_activity', 'tautulli_get_history',
+                'tautulli_get_last_played', 'tautulli_get_metadata', 'tautulli_get_libraries',
+                'tautulli_get_library_media_info', 'tautulli_get_item_watch_stats',
+                'tautulli_get_users', 'tautulli_get_user_names',
+                'tautulli_get_user_watch_stats', 'tautulli_get_home_stats', 'tautulli_search'}
+    assert expected <= names
+    # No write tool and no other service's tools leak in with a Tautulli-only config.
+    assert not {name for name in names if 'remove' in name or 'add_' in name}
+    assert not {name for name in names if name.startswith(('radarr_', 'sonarr_', 'downloads_'))}
+    for tool in tools:
+        if tool.name.startswith('tautulli_'):
+            assert tool.annotations.readOnlyHint is True
+            assert tool.annotations.destructiveHint is False
+    tautulli.close()
+
+
+@pytest.mark.asyncio
+async def test_tautulli_tools_are_absent_without_tautulli():
+    def handler(request):
+        return httpx.Response(200, json={'recordsTotal': 0, 'records': []})
+    radarr = RadarrClient(ServiceConfig('radarr', 'https://radarr.test', api_key='key'),
+                          httpx.MockTransport(handler))
+    server = build_server(AppConfig(), {'radarr': radarr})
+    names = {tool.name for tool in await server.list_tools()}
+    assert not {name for name in names if name.startswith('tautulli_')}
+    radarr.close()
+
+
+@pytest.mark.asyncio
+async def test_last_played_through_mcp_dispatch_for_a_movie_and_a_show():
+    """The Boss asked for latest-play coverage through MCP dispatch, not only the
+    client: the routed column must differ between a movie and a show."""
+    seen = []
+
+    def handler(request):
+        params = dict(request.url.params)
+        seen.append(params)
+        if params.get('grandparent_rating_key'):  # a show: episodes carry the play
+            rows = [{'row_id': 4, 'date': 1762100000, 'user': 'bob', 'media_type': 'episode',
+                     'grandparent_title': 'Severance', 'file': '/media/secret.mkv'}]
+        elif params.get('rating_key'):            # a movie: its own key
+            rows = [{'row_id': 9, 'date': 1762000000, 'user': 'alice', 'media_type': 'movie',
+                     'full_title': 'Arrival', 'file': '/media/arrival.mkv'}]
+        else:
+            rows = []
+        return httpx.Response(200, json={'response': {'result': 'success', 'data': {
+            'recordsTotal': len(rows), 'recordsFiltered': len(rows), 'data': rows}}})
+
+    tautulli = TautulliClient(ServiceConfig('tautulli', 'http://tautulli.test:8181',
+                                            api_key='key'),
+                              httpx.MockTransport(handler))
+    server = build_server(AppConfig(), {'tautulli': tautulli})
+
+    movie = unpack(await server.call_tool('tautulli_get_last_played',
+                                          {'rating_key': 4348, 'media_type': 'movie'}))
+    assert seen[-1]['rating_key'] == '4348' and 'grandparent_rating_key' not in seen[-1]
+    assert movie['played'] is True and movie['last_played'] == 1762000000
+    assert movie['last_play']['user'] == 'alice'
+    assert 'file' not in movie['last_play']  # server paths never reach the caller
+
+    show = unpack(await server.call_tool('tautulli_get_last_played',
+                                         {'rating_key': 1219, 'media_type': 'show'}))
+    assert seen[-1]['grandparent_rating_key'] == '1219' and 'rating_key' not in seen[-1]
+    assert show['played'] is True and show['last_played'] == 1762100000
+    tautulli.close()
+
+
+@pytest.mark.asyncio
+async def test_last_played_through_mcp_dispatch_reports_no_history():
+    """A never-watched item is a valid answer, not an error."""
+    def handler(request):
+        return httpx.Response(200, json={'response': {'result': 'success', 'data': {
+            'recordsTotal': 0, 'recordsFiltered': 0, 'data': []}}})
+
+    tautulli = TautulliClient(ServiceConfig('tautulli', 'http://tautulli.test:8181',
+                                            api_key='key'),
+                              httpx.MockTransport(handler))
+    server = build_server(AppConfig(), {'tautulli': tautulli})
+    result = unpack(await server.call_tool('tautulli_get_last_played',
+                                           {'rating_key': 999, 'media_type': 'movie'}))
+    assert result['played'] is False and result['last_played'] is None
+    tautulli.close()

@@ -210,7 +210,9 @@ class ServiceClient:
                 if same_origin and not redirect_path.startswith(base_path):
                     raise ServiceError(f"{self.config.name}: redirect outside configured service path refused")
                 headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
-                if same_origin and self.config.api_key and self.config.name not in {"sabnzbd", "nzbhydra"}:
+                # Tautulli, SABnzbd and NZBHydra carry the key in the query string or
+                # their own parameter; a header as well would duplicate the secret.
+                if same_origin and self.config.api_key and self.config.name not in {"sabnzbd", "nzbhydra", "tautulli"}:
                     headers["X-Api-Key"] = self.config.api_key
                 auth = httpx.BasicAuth(self.config.username, self.config.password) if same_origin and self.config.name == "nzbget" else None
                 # New Request avoids carrying cookies/auth to redirect destinations.

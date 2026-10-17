@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .clients.nzbhydra import NZBHydraClient
     from .clients.nzbget import NZBGetClient
     from .clients.sabnzbd import SABnzbdClient
+    from .clients.tautulli import TautulliClient
 
 
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
@@ -31,7 +32,8 @@ def create_clients(config: AppConfig) -> dict[str, ServiceClient]:
     # Fixed mapping, not plugin discovery. Unconfigured clients are never imported.
     modules = {"radarr": ("arr", "RadarrClient"), "sonarr": ("arr", "SonarrClient"),
                "nzbget": ("nzbget", "NZBGetClient"), "sabnzbd": ("sabnzbd", "SABnzbdClient"),
-               "nzbhydra": ("nzbhydra", "NZBHydraClient")}
+               "nzbhydra": ("nzbhydra", "NZBHydraClient"),
+               "tautulli": ("tautulli", "TautulliClient")}
     clients: dict[str, ServiceClient] = {}
     try:
         for name, settings in config.service_configs().items():
@@ -215,6 +217,35 @@ def build_server(config: AppConfig, clients: dict[str, ServiceClient] | None = N
                         "note": "Direct Hydra submission bypasses *arr release selection and does not guarantee library import."}
             register("nzbhydra_download_result", nzbhydra_download_result,
                      "Fetch one Hydra result server-side and submit NZB bytes to an explicitly permitted downloader/category. No arbitrary URLs. Does not fulfill a managed request.", True)
+    if "tautulli" in clients:
+        tautulli = cast("TautulliClient", clients["tautulli"])
+        # Read-only viewing history: no mutation tools exist for this service.
+        register("tautulli_get_server_status", tautulli.server_status,
+                 "Check Tautulli's connection to the Plex server; the safest first call.")
+        register("tautulli_get_activity", tautulli.activity,
+                 "Current Plex streams (who is watching what right now). Empty means nobody is streaming, not that nothing was ever watched.")
+        register("tautulli_get_history", tautulli.history,
+                 "Watch history rows (one per play), newest first, filterable by user, item rating key, library, title search and date; paged.")
+        register("tautulli_get_last_played", tautulli.last_played,
+                 "Most recent play of ONE item with its timestamp: answers 'when was it last played and by whom'. Pass media_type so the right history column is used (movie/episode by own rating key, show by grandparent, season by parent). played=false means no recorded plays.")
+        register("tautulli_get_metadata", tautulli.metadata,
+                 "Metadata for one item by Plex rating key; use it to resolve a title before asking about its plays. Omits file paths.")
+        register("tautulli_get_libraries", tautulli.libraries,
+                 "Plex libraries with item counts; section_id feeds the library and history tools.")
+        register("tautulli_get_library_media_info", tautulli.library_media_info,
+                 "Items in one library with play_count and last_played timestamps, including never-watched entries (play_count 0); paged. Use it to find unwatched titles or the last_played of many items at once.")
+        register("tautulli_get_item_watch_stats", tautulli.item_watch_stats,
+                 "Per-user plays plus total time windows for one item: answers 'has anyone watched this' and 'who watched it'. Not a last-play lookup; use tautulli_get_last_played for that.")
+        register("tautulli_get_users", tautulli.users,
+                 "Users with access to the Plex server, their ids and share permissions.")
+        register("tautulli_get_user_names", tautulli.user_names,
+                 "Light user_id-to-name lookup for the other tools.")
+        register("tautulli_get_user_watch_stats", tautulli.user_watch_stats,
+                 "One user's viewing totals per time window and per player (Tautulli users, not Plex accounts). total_plays is all-time only, or null when the requested windows exclude it.")
+        register("tautulli_get_home_stats", tautulli.home_stats,
+                 "Top/popular titles, users, platforms and last-watched over a time range, by plays or duration.")
+        register("tautulli_search", tautulli.search,
+                 "Search the Plex library for a title to find its rating key.")
     # FastMCP v1 defaults to coercing inputs. Validate wire JSON first so true
     # cannot become movie ID 1, and "false" cannot become a monitoring flag.
     server._mcp_server.call_tool(validate_input=True)(server.call_tool)

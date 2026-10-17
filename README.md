@@ -2,7 +2,7 @@
 
 ![ArrChestra retro-CRT banner](header.png)
 
-ArrChestra connects your MCP client to **Seerr/Jellyseerr, Sonarr, Radarr, NZBGet, SABnzbd and NZBHydra2**. You can request movies and shows, check upcoming episodes, change monitoring, and pause or retry downloads.
+ArrChestra connects your MCP client to **Seerr/Jellyseerr, Sonarr, Radarr, NZBGet, SABnzbd, NZBHydra2 and Tautulli**. You can request movies and shows, check upcoming episodes, change monitoring, pause or retry downloads, and ask what your Plex users actually watch.
 
 Each service is optional. Configure the ones you use; ArrChestra starts in read-only mode.
 
@@ -15,6 +15,7 @@ Each service is optional. Configure the ones you use; ArrChestra starts in read-
 | Sonarr | Series and episode lookup, season monitoring, missing episodes, upcoming airings, searches, queue/history and individual queue removal |
 | NZBGet / SABnzbd | Download status, queue/history, categories, pause/resume and targeted retries |
 | NZBHydra2 | Release searches and submission of a selected result to either downloader |
+| Tautulli | Plex watch history and library questions; read-only |
 
 There are no tools for deleting library titles, purging whole queues, restarting services, changing service configuration or running scripts.
 
@@ -58,6 +59,7 @@ Environment variables override `.env` in the working directory. Restart after ch
 | NZBGet | `NZBGET_URL`, `NZBGET_USERNAME`, `NZBGET_PASSWORD` |
 | SABnzbd | `SABNZBD_URL`, `SABNZBD_API_KEY` |
 | NZBHydra2 | `NZBHYDRA_URL`, `NZBHYDRA_API_KEY` |
+| Tautulli | `TAUTULLI_URL`, `TAUTULLI_API_KEY` |
 
 Only configured services appear in your client's tool list. Configure at least one service. If a service is missing required settings, startup fails and lists what's missing. You can connect one instance of each service, including both NZBGet and SABnzbd.
 
@@ -203,6 +205,32 @@ Downloader tools require `backend="nzbget"` or `backend="sabnzbd"`. Pause and re
 
 `sonarr_remove_queue_item` clears one Sonarr queue entry by its queue `item_id`. By default it leaves the downloader's files alone and doesn't blocklist the release. `remove_from_client=true` also requests removal from the downloader and may delete its files; `blocklist=true` marks the release failed. Queue removal requires Sonarr write permission.
 
+### Plex watch history (Tautulli)
+
+Tautulli tools answer what has actually been watched, rather than what is available. They are read-only: there is no tool to delete history, terminate a stream, edit a library or change Tautulli settings, and none needs write permission.
+
+Free text from Tautulli (titles, user names, status messages, summaries) is truncated to 512 characters; ids, timestamps and other numeric values are returned intact.
+
+| Ask your client | Tool |
+| --- | --- |
+| "Is anyone watching anything right now?" | `tautulli_get_activity` |
+| "Has anyone watched Severance, and who?" | `tautulli_get_item_watch_stats` |
+| "When was Severance last played?" | `tautulli_get_last_played` |
+| "When was Game of Thrones last played by anyone?" | `tautulli_get_last_played` (as a show) |
+| "What was the last thing watched on this server?" | `tautulli_get_home_stats` (`stat_id="last_watched"`) |
+| "What has the family watched this month?" | `tautulli_get_history` |
+| "Which movies in my library has nobody ever played?" | `tautulli_get_library_media_info` |
+| "What are my most-watched shows and top users?" | `tautulli_get_home_stats` |
+| "What libraries do I have?" | `tautulli_get_libraries` |
+
+IDs come from Plex, not Sonarr/Radarr: history and stats use a Plex `rating_key`, where a show is the grandparent key and an episode or movie is its own. Use `tautulli_search` to turn a title into a rating key, or `tautulli_get_metadata` once you have one. `tautulli_get_library_media_info` needs a `section_id` from `tautulli_get_libraries`.
+
+`tautulli_get_activity` shows only streams playing right now, so an empty result means nobody is streaming at this moment, not that an item was never watched; use `tautulli_get_item_watch_stats` for that. Tautulli's own users (as it tracks viewing) feed `tautulli_get_user_watch_stats`, while `tautulli_get_users` lists the Plex accounts that can reach the server.
+
+Older-watched questions split two ways. `tautulli_get_last_played` returns the single most recent play with its timestamp and who played it, and needs `media_type` because Tautulli records each play against the actual file: a movie or episode matches on its own rating key, a show matches through its episodes' grandparent key, and a season through the parent key. The tool picks that column for you, so pass `media_type="show"` for a series and `media_type="movie"` for a film. `played: false` in the reply means no plays are recorded, which is the correct answer for an untouched title. For a list of past plays instead of just the latest one, use `tautulli_get_history`.
+
+`tautulli_get_item_watch_stats` and `tautulli_get_user_watch_stats` return per-window rows (`watch_time`) plus the users or players involved. Their `total_plays` is all-time only, and is `null` when you ask for windows that exclude all time (`query_days` without `0`), because Tautulli's windows nest (1 day sits inside 7, which sits inside 30) and cannot be added up.
+
 ### Downloading from NZBHydra2
 
 `nzbhydra_search` searches your indexers through Hydra. `nzbhydra_get_capabilities` lists the supported filters and categories.
@@ -226,6 +254,7 @@ If NZB retrieval redirects to an indexer, add that indexer's origin to `NZBHYDRA
 | Sonarr | `sonarr_find_series`, `sonarr_get_series`, `sonarr_get_episodes`, `sonarr_get_next_up`, `sonarr_get_missing`, `sonarr_get_calendar`, `sonarr_get_options`, `sonarr_get_queue`, `sonarr_get_history`, `sonarr_get_health`, `sonarr_get_releases`, `sonarr_get_command`, `sonarr_add_series`, `sonarr_set_monitoring`, `sonarr_search_episodes`, `sonarr_grab_release`, `sonarr_remove_queue_item` |
 | Downloaders | `downloads_get_status`, `downloads_get_queue`, `downloads_get_history`, `downloads_get_categories`, `downloads_pause`, `downloads_resume`, `downloads_retry` |
 | NZBHydra | `nzbhydra_get_capabilities`, `nzbhydra_search`, `nzbhydra_download_result` |
+| Tautulli | `tautulli_get_server_status`, `tautulli_get_activity`, `tautulli_get_history`, `tautulli_get_last_played`, `tautulli_get_metadata`, `tautulli_get_libraries`, `tautulli_get_library_media_info`, `tautulli_get_item_watch_stats`, `tautulli_get_users`, `tautulli_get_user_names`, `tautulli_get_user_watch_stats`, `tautulli_get_home_stats`, `tautulli_search` |
 
 The Hydra submission tool appears only when a downloader is configured. Downloader calls always require an explicit backend.
 

@@ -1,6 +1,6 @@
 # ArrChestra implementation notes
 
-ArrChestra provides MCP tools for Seerr/Jellyseerr, Radarr, Sonarr, NZBGet, SABnzbd and NZBHydra2. Each service is optional. The server supplies operations and status; the agent decides which calls to make.
+ArrChestra provides MCP tools for Seerr/Jellyseerr, Radarr, Sonarr, NZBGet, SABnzbd, NZBHydra2 and Tautulli. Each service is optional. The server supplies operations and status; the agent decides which calls to make.
 
 ## Structure
 
@@ -13,6 +13,7 @@ ArrChestra provides MCP tools for Seerr/Jellyseerr, Radarr, Sonarr, NZBGet, SABn
 | `clients/nzbget.py` | Positional JSON-RPC and NZBGet state conversion |
 | `clients/sabnzbd.py` | SABnzbd's mode-based API and multipart submission |
 | `clients/nzbhydra.py` | Public Newznab capabilities, searches and NZB retrieval |
+| `clients/tautulli.py` | Read-only Plex watch history, users and library viewing stats |
 | `server.py` | Fixed tool registration, dispatch, concurrency and cleanup |
 | `arrchestra_mcp/` | Branded module entrypoint; `jellyseerr_mcp` remains available |
 
@@ -72,6 +73,18 @@ A download call accepts a numeric Hydra result ID, not an arbitrary URL. Fetch t
 
 Direct Hydra submissions don't claim a managed library import or completion of a Seerr request.
 
+### Tautulli
+
+Use the documented API v2 read commands (`/api/v2?cmd=...`); the client is read-only and never calls `require_write()`. Unlike the other services, Tautulli reports API failures with HTTP 200 and an error envelope, so success is decided by `response.result`, not the status code. The API key travels as the documented `apikey` query parameter, which is why `http.py` must not also add an `X-Api-Key` header for this service.
+
+Commands cover current streams (`get_activity`), watch history (`get_history`), the latest play of one item (`get_last_played`), item metadata (`get_metadata`), per-item and per-user watch stats, libraries (`get_libraries`, `get_library_media_info`), users (`get_users`, `get_user_names`), home rankings (`get_home_stats`) and library search (`search`). The id space is Plex's, not Sonarr/Radarr's: a show is a grandparent `rating_key` and an episode or movie is its own, which is why `get_last_played` selects the matching history column from `media_type` instead of trusting a caller-supplied key.
+
+Watch-time windows nest (`query_days` 1 sits inside 7, which sits inside 30, and 0 means all time), so they are returned per-window and never summed. `total_plays` is taken from the all-time row alone and is null when that window was not requested; a repeated day value is rejected.
+
+Live activity is not history: an empty `get_activity` means no current stream, while "never watched" comes from `play_count` or watch-time stats. Media file paths and raw stream lists are dropped on the way out.
+
+Every projected record passes through `_project`, which caps free text at 512 characters recursively (including nested `media_info`) and keeps real JSON numbers intact. The exemption for Tautulli's string-encoded ids and timestamps is keyed on the **field name** (`NUMERIC_FIELDS`), never on the value: a "looks numeric" test is unsafe because `float("1" * 100000)` is infinity and `float("0" * 100000)` is zero, so any value-based exemption lets digit-only titles and status messages through unbounded. Envelope fields copied outside a data row (home-stats `stat_id`/`stat_type`, the search result's media-type key) are bounded explicitly for the same reason. The transport's 8 MiB response cap is a whole-body limit, not a per-field bound, which is why the text bound lives here instead of relying on it.
+
 ## Safety rules
 
 - Check write permissions before mutation preflight traffic.
@@ -113,4 +126,5 @@ Authenticated network transport, named instances of the same service, and broade
 - [NZBGet](https://nzbget.com/documentation/api/), including [append](https://nzbget.com/documentation/api/append/) and [editqueue](https://nzbget.com/documentation/api/editqueue/).
 - [SABnzbd](https://sabnzbd.org/wiki/configuration/5.1/api).
 - [NZBHydra public API](https://github.com/theotherp/nzbhydra2/wiki/External-API,-RSS-and-cached-queries) and [Newznab specification](https://newznab.readthedocs.io/en/latest/misc/api.html).
+- [Tautulli API reference](https://github.com/Tautulli/Tautulli/wiki/Tautulli-API-Reference) for the read-only Plex watch-history commands.
 - [MCP Python SDK v1](https://py.sdk.modelcontextprotocol.io/v1/server/).

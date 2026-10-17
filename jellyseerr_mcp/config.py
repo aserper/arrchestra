@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
-SERVICES = ("jellyseerr", "radarr", "sonarr", "nzbget", "sabnzbd", "nzbhydra")
+SERVICES = ("jellyseerr", "radarr", "sonarr", "nzbget", "sabnzbd", "nzbhydra", "tautulli")
 
 # Services whose target/release search fans out over every configured indexer and
 # therefore needs its own, longer deadline than ordinary metadata reads.
